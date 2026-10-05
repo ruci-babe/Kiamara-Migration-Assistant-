@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import curses
 import json
 import os
 import platform
@@ -9,6 +8,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+try:
+    import curses
+except ImportError:
+    curses = None
 
 PACKAGE_MANAGERS = {
     'debian': {'list': ['dpkg-query', '-W', '-f=${Package}\n'], 'install': 'apt-get install -y'},
@@ -121,6 +125,15 @@ DEFAULT_FILES = [
     '~/.ssh',
 ]
 
+if platform.system() == 'Windows':
+    DEFAULT_FILES = [
+        '~/Documents',
+        '~/Pictures',
+        '~/Desktop',
+        '~/Downloads',
+        '~/AppData/Roaming',
+    ]
+
 
 class MigrationError(Exception):
     pass
@@ -145,17 +158,43 @@ def execute_command(command, dry_run=False):
 def get_package_install_command(target_distro, packages):
     if target_distro not in PACKAGE_MANAGERS:
         raise MigrationError(f"Unsupported target distro: {target_distro}")
+    packages = validate_package_names(packages)
     install_cmd = PACKAGE_MANAGERS[target_distro]['install']
     return shlex.split(install_cmd) + sorted(set(packages))
 
 
-def deploy_manifest(manifest_path, target_distro, mapping=None, dry_run=False, save_script=None, force=False):
+def validate_package_names(packages):
+    if not isinstance(packages, list):
+        raise MigrationError('Manifest packages must be a JSON array of strings.')
+
+    validated = []
+    for package in packages:
+        if not isinstance(package, str):
+            raise MigrationError('Every package name must be a string.')
+        package = package.strip()
+        if not package or len(package) > 256 or package.startswith('-') or any(char.isspace() for char in package):
+            raise MigrationError(f'Invalid package name: {package!r}')
+        if any(char in package for char in ';|&<>$`\\\"\'\n\r'):
+            raise MigrationError(f'Unsafe characters in package name: {package!r}')
+        validated.append(package)
+    return validated
+
+
+def load_manifest_packages(manifest_path):
     manifest = load_json_file(manifest_path)
-    packages = manifest.get('packages', [])
+    if not isinstance(manifest, dict):
+        raise MigrationError('Migration manifest must contain a JSON object.')
+    return validate_package_names(manifest.get('packages', []))
+
+
+def deploy_manifest(manifest_path, target_distro, mapping=None, dry_run=False, save_script=None, force=False):
+    packages = load_manifest_packages(manifest_path)
     if mapping is None:
         mapping = {}
+    if not isinstance(mapping, dict):
+        raise MigrationError('Package mapping must be a JSON object.')
     mapping = {str(k).strip().lower(): v for k, v in mapping.items()}
-    translated = [mapping.get(pkg.lower(), pkg) for pkg in packages]
+    translated = validate_package_names([mapping.get(pkg.lower(), pkg) for pkg in packages])
 
     if save_script:
         build_install_script(translated, target_distro, mapping=None, output_path=save_script)
@@ -206,8 +245,11 @@ def list_installed_packages(source_distro):
 
 
 def load_json_file(path):
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationError(f'Unable to read JSON file {path}: {exc}') from exc
 
 
 def save_json_file(data, path):
@@ -220,8 +262,11 @@ def build_install_script(packages, target_distro, mapping=None, output_path=None
         raise MigrationError(f"Unsupported target distro: {target_distro}")
     if mapping is None:
         mapping = {}
+    if not isinstance(mapping, dict):
+        raise MigrationError('Package mapping must be a JSON object.')
 
     target_cmd = PACKAGE_MANAGERS[target_distro]['install']
+    packages = validate_package_names(packages)
     translated = []
     total = len(packages)
     for index, pkg in enumerate(packages, start=1):
@@ -230,13 +275,14 @@ def build_install_script(packages, target_distro, mapping=None, output_path=None
             print_progress_bar(index, total, prefix='Translating packages:', suffix='Complete', length=40)
     if show_progress:
         print()
+    translated = validate_package_names(translated)
 
     lines = [
         '#!/bin/sh',
         '# Generated package install plan',
         'set -e',
         'echo "Installing translated package list..."',
-        f'{target_cmd} ' + ' '.join(sorted(set(translated))),
+        f'{target_cmd} ' + ' '.join(shlex.quote(pkg) for pkg in sorted(set(translated))),
     ]
     script_text = '\n'.join(lines) + '\n'
     if output_path:
@@ -474,11 +520,18 @@ def copy_paths(paths, destination, dry_run=False, show_progress=False):
     path_list = normalize_paths(paths)
     total = len(path_list)
     for index, path in enumerate(path_list, start=1):
+        path = path.expanduser()
         if not path.exists():
             print(f"Skipping missing path: {path}")
             if show_progress:
                 print_progress_bar(index, total, prefix='Copying paths:', suffix='Skipped', length=30)
             continue
+        resolved_path = path.resolve()
+        try:
+            if os.path.commonpath((str(resolved_path), str(destination))) == str(resolved_path):
+                raise MigrationError(f'Destination cannot be inside source path: {destination}')
+        except ValueError:
+            pass
         target = destination / path.name
         if dry_run:
             print(f"DRY RUN: would copy {path} -> {target}")
@@ -487,9 +540,7 @@ def copy_paths(paths, destination, dry_run=False, show_progress=False):
                 print_progress_bar(index, total, prefix='Copying paths:', suffix='Dry run', length=30)
             continue
         if path.is_dir():
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(path, target, symlinks=True)
+            shutil.copytree(path, target, symlinks=True, dirs_exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
@@ -551,6 +602,9 @@ def choose_action():
         'Deploy manifest packages',
         'Quit',
     ]
+    if curses is None:
+        return choose_action_text()
+
     try:
         def _menu(stdscr):
             curses.curs_set(0)
@@ -789,8 +843,7 @@ def main(cli_args=None):
         print(f"Migration manifest written to {args.manifest}")
 
     elif args.command == 'plan':
-        manifest = load_json_file(args.manifest)
-        packages = manifest.get('packages', [])
+        packages = load_manifest_packages(args.manifest)
         mapping = {}
         if args.map:
             mapping = load_json_file(args.map)

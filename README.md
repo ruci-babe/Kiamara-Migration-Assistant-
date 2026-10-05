@@ -43,12 +43,6 @@ python3 migrate.py export --manifest migration-manifest.json --output-dir migrat
 
 This creates:
 
-```
-python3 migrate.py export --manifest migration-manifest.json --output-dir migration-data
-```
-
-This creates:
-
 - `migration-manifest.json`
 - `migration-data/` containing copied files
 
@@ -68,14 +62,39 @@ This will generate and run the install command for the packages in the manifest.
 
 ### Build Windows executable
 
-A Windows executable can be created with PyInstaller.
+A Windows executable can be created with PyInstaller from PowerShell.
 
-```bash
-python3 -m pip install pyinstaller
-./build_windows_exe.sh
+```powershell
+py -3 -m pip install -r requirements-dev.txt
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\build_windows_exe.ps1
 ```
 
-If Wine is installed, the helper will attempt a Windows-compatible build from Linux. Otherwise, run the same PyInstaller command on Windows.
+The executable is written to `dist\windows\Kiamara.exe`.
+
+### Run on Windows with PowerShell
+
+Install Python 3.8 or newer, then run the PowerShell wrapper from this repository:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run_windows.ps1 --help
+.\run_windows.ps1 export --manifest migration-manifest.json --output-dir migration-data
+```
+
+Run `.\run_windows.ps1` without arguments to open the interactive text menu. Windows does not require any third-party Python packages; the wrapper uses the `py` launcher when available and falls back to `python`.
+
+### Run directly from GitHub without installing
+
+From PowerShell, paste this single command to download the program temporarily and launch it:
+
+```powershell
+irm https://raw.githubusercontent.com/ruci-babe/Kiamara-Migration-Assistant-/main/run_from_github.ps1 | iex
+```
+
+The launcher stores the manifest and copied migration files in `Documents\Kiamara-Migration`. If Python 3 is not already installed, it downloads the official Python embeddable runtime temporarily instead of requiring administrator access. After the program exits, it removes the downloaded Python runtime, program, and temporary folder; it does not remove anything in `Documents\Kiamara-Migration`.
+
+This command runs the current `main` branch from GitHub with the current user’s permissions. Review `run_from_github.ps1` before using it if you need to verify downloaded code first; for higher assurance, use a pinned release and verify its checksum instead of executing a mutable branch directly.
 
 ### Copy arbitrary files to a bundle
 
@@ -153,6 +172,7 @@ python3 migrate.py plan migration-manifest.json --target-distro fedora --map pac
 
 - The tool does not perform automatic package name translation across all distros; use a mapping file for custom translations.
 - File copying preserves directory structure and symlinks.
+- Migration bundles may contain credentials, browser data, SSH keys, and other private files when those paths are selected. Review the paths before exporting, protect the bundle, and delete it securely when it is no longer needed.
 - Run the generated install script on the target host after copying the migration bundle and manifest.
 
 ## Requirements
